@@ -8,7 +8,7 @@ const ElectricityLoadDashboard = () => {
   const [forecastData, setForecastData] = useState([]);
   const [anomalies, setAnomalies] = useState([]);
   const [timeRange, setTimeRange] = useState('week'); // 'day', 'week', 'month', 'year'
-  const [selectedTab, setSelectedTab] = useState('overview'); // 'overview', 'patterns', 'forecast', 'anomalies'
+  const [selectedTab, setSelectedTab] = useState('overview'); // 'overview', 'patterns', 'forecast', 'anomalies', 'advanced'
   const [selectedModel, setSelectedModel] = useState('gradient_boosting');
   const [forecastHorizon, setForecastHorizon] = useState(24);
   const [loadingForecast, setLoadingForecast] = useState(false);
@@ -423,6 +423,12 @@ const ElectricityLoadDashboard = () => {
             onClick={() => setSelectedTab('anomalies')}
           >
             Anomalies
+          </button>
+          <button 
+            className={`px-3 py-1 rounded ${selectedTab === 'advanced' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-800'}`}
+            onClick={() => setSelectedTab('advanced')}
+          >
+            Advanced Analytics
           </button>
         </div>
       </div>
@@ -1240,6 +1246,251 @@ const ElectricityLoadDashboard = () => {
           </div>
             </>
           )}
+        </div>
+      )}
+      
+      {selectedTab === 'advanced' && (
+        <div>
+          <div className="bg-white p-4 rounded-lg shadow mb-6">
+            <h2 className="text-lg font-semibold mb-4">Advanced Analytics & Comparative Visualizations</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              This section combines interactive dashboard visualizations with pre-generated plots from the forecasting pipeline for comprehensive analysis.
+            </p>
+            
+            {/* Time Series Section */}
+            <div className="mb-8">
+              <h3 className="text-md font-semibold mb-3 border-b pb-2">Time Series Analysis</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-2">
+                <div className="border rounded-lg overflow-hidden shadow">
+                  <div className="bg-gray-50 p-3 border-b">
+                    <h3 className="font-medium">Dashboard: Interactive Load Trend</h3>
+                    <p className="text-xs text-gray-500">Interactive visualization with time range selection</p>
+                  </div>
+                  <div className="p-2 h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={getFilteredData()}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis 
+                          dataKey="timestamp" 
+                          tickFormatter={(timestamp) => {
+                            const date = new Date(timestamp);
+                            return `${date.getMonth()+1}/${date.getDate()}`;
+                          }}
+                          interval={48}
+                        />
+                        <YAxis />
+                        <Tooltip labelFormatter={(timestamp) => new Date(timestamp).toLocaleString()} />
+                        <Line type="monotone" dataKey="Load" stroke="#3182ce" dot={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                
+                <div className="border rounded-lg overflow-hidden shadow">
+                  <div className="bg-gray-50 p-3 border-b">
+                    <h3 className="font-medium">Pipeline: Complete Load History</h3>
+                    <p className="text-xs text-gray-500">Pre-generated visualization of the entire dataset</p>
+                  </div>
+                  <div className="p-2">
+                    <img 
+                      src="/plots/load_time_series.png" 
+                      alt="Load Time Series"
+                      className="w-full h-auto rounded"
+                    />
+                  </div>
+                </div>
+              </div>
+              
+              <div className="border rounded-lg overflow-hidden shadow mt-4">
+                <div className="bg-gray-50 p-3 border-b">
+                  <h3 className="font-medium">Seasonal Decomposition (Advanced Analysis)</h3>
+                  <p className="text-xs text-gray-500">Breakdown of time series into trend, seasonality, and residual components</p>
+                </div>
+                <div className="p-2">
+                  <img 
+                    src="/plots/seasonal_decomposition.png" 
+                    alt="Seasonal Decomposition"
+                    className="w-full h-auto rounded"
+                  />
+                </div>
+              </div>
+            </div>
+            
+            {/* Hourly, Daily, Monthly Patterns */}
+            <div className="mb-8">
+              <h3 className="text-md font-semibold mb-3 border-b pb-2">Temporal Pattern Comparison</h3>
+              
+              {/* Hourly Patterns */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                <div className="border rounded-lg overflow-hidden shadow">
+                  <div className="bg-gray-50 p-3 border-b">
+                    <h3 className="font-medium">Dashboard: Interactive Hourly Pattern</h3>
+                    <p className="text-xs text-gray-500">Interactive visualization with detailed statistics</p>
+                  </div>
+                  <div className="p-2 h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={getHourlyPatternData()}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="hour" />
+                        <YAxis />
+                        <Tooltip formatter={(value) => [`${value.toFixed(2)} MWh`, 'Load']} />
+                        <Area type="monotone" dataKey="minLoad" fill="#e3f2fd" stroke="#90caf9" name="Min Load" />
+                        <Area type="monotone" dataKey="maxLoad" fill="#bbdefb" stroke="#42a5f5" name="Max Load" />
+                        <Line type="monotone" dataKey="averageLoad" stroke="#1e88e5" name="Avg Load" strokeWidth={2} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                
+                <div className="border rounded-lg overflow-hidden shadow">
+                  <div className="bg-gray-50 p-3 border-b">
+                    <h3 className="font-medium">Pipeline: Hourly Load Distribution</h3>
+                    <p className="text-xs text-gray-500">Box plot showing statistical distribution by hour</p>
+                  </div>
+                  <div className="p-2">
+                    <img 
+                      src="/plots/load_by_hour.png" 
+                      alt="Load by Hour"
+                      className="w-full h-auto rounded"
+                    />
+                  </div>
+                </div>
+              </div>
+              
+              {/* Daily and Monthly Patterns */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="border rounded-lg overflow-hidden shadow">
+                  <div className="bg-gray-50 p-3 border-b">
+                    <h3 className="font-medium">Day of Week Analysis</h3>
+                    <div className="flex justify-between items-center">
+                      <p className="text-xs text-gray-500">Compare interactive chart with statistical distribution</p>
+                      <button 
+                        className="text-xs text-blue-600 hover:underline"
+                        onClick={() => window.open('/plots/load_by_day.png', '_blank')}
+                      >
+                        View Full Plot
+                      </button>
+                    </div>
+                  </div>
+                  <div className="p-2 h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={getDailyPatternData()}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="day" />
+                        <YAxis />
+                        <Tooltip formatter={(value) => [`${value.toFixed(2)} MWh`, 'Load']} />
+                        <Bar dataKey="minLoad" fill="#e3f2fd" name="Min Load" />
+                        <Bar dataKey="maxLoad" fill="#bbdefb" name="Max Load" />
+                        <Line type="monotone" dataKey="averageLoad" stroke="#1e88e5" name="Avg Load" strokeWidth={2} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+                
+                <div className="border rounded-lg overflow-hidden shadow">
+                  <div className="bg-gray-50 p-3 border-b">
+                    <h3 className="font-medium">Monthly Analysis</h3>
+                    <div className="flex justify-between items-center">
+                      <p className="text-xs text-gray-500">Compare interactive chart with statistical distribution</p>
+                      <button 
+                        className="text-xs text-blue-600 hover:underline"
+                        onClick={() => window.open('/plots/load_by_month.png', '_blank')}
+                      >
+                        View Full Plot
+                      </button>
+                    </div>
+                  </div>
+                  <div className="p-2 h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={getMonthlyPatternData()}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="month" />
+                        <YAxis />
+                        <Tooltip formatter={(value) => [`${value.toFixed(2)} MWh`, 'Load']} />
+                        <Area type="monotone" dataKey="minLoad" fill="#e3f2fd" stroke="#90caf9" name="Min Load" stackId="1" />
+                        <Area type="monotone" dataKey="maxLoad" fill="#bbdefb" stroke="#42a5f5" name="Max Load" stackId="1" />
+                        <Line type="monotone" dataKey="averageLoad" stroke="#1e88e5" name="Avg Load" strokeWidth={2} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            {/* Advanced Feature Analysis */}
+            <div className="mb-6">
+              <h3 className="text-md font-semibold mb-3 border-b pb-2">Advanced Feature Analysis</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                {/* Correlation Heatmap */}
+                <div className="border rounded-lg overflow-hidden shadow">
+                  <div className="bg-gray-50 p-3 border-b">
+                    <h3 className="font-medium">Correlation Heatmap</h3>
+                    <p className="text-xs text-gray-500">Relationship strength between different variables</p>
+                  </div>
+                  <div className="p-2">
+                    <img 
+                      src="/plots/correlation_heatmap.png" 
+                      alt="Correlation Heatmap"
+                      className="w-full h-auto rounded"
+                    />
+                  </div>
+                </div>
+                
+                {/* Load vs Features */}
+                <div className="border rounded-lg overflow-hidden shadow">
+                  <div className="bg-gray-50 p-3 border-b">
+                    <h3 className="font-medium">Load vs Features</h3>
+                    <p className="text-xs text-gray-500">Scatter plots showing relationship with key drivers</p>
+                  </div>
+                  <div className="p-2">
+                    <img 
+                      src="/plots/load_vs_features.png" 
+                      alt="Load vs Features"
+                      className="w-full h-auto rounded"
+                    />
+                  </div>
+                </div>
+              </div>
+              
+              {/* Full width for Temperature by Season */}
+              <div className="border rounded-lg overflow-hidden shadow">
+                <div className="bg-gray-50 p-3 border-b">
+                  <h3 className="font-medium">Load vs Temperature by Season</h3>
+                  <p className="text-xs text-gray-500">Seasonal variation in the temperature-load relationship</p>
+                </div>
+                <div className="p-2">
+                  <img 
+                    src="/plots/load_temp_by_season.png" 
+                    alt="Load vs Temperature by Season"
+                    className="w-full h-auto rounded"
+                  />
+                </div>
+              </div>
+            </div>
+            
+            {/* Insights Section */}
+            <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+              <h3 className="text-md font-semibold mb-2">Key Insights</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <h4 className="text-sm font-medium">Temporal Patterns</h4>
+                  <ul className="list-disc list-inside text-sm text-gray-700 ml-2 space-y-1">
+                    <li>Strong daily patterns with peaks during business hours (9AM-5PM)</li>
+                    <li>Weekend consumption significantly lower than weekday consumption</li>
+                    <li>Seasonal variations with winter months showing higher usage</li>
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="text-sm font-medium">Feature Relationships</h4>
+                  <ul className="list-disc list-inside text-sm text-gray-700 ml-2 space-y-1">
+                    <li>Temperature has non-linear relationship with load (U-shaped curve)</li>
+                    <li>Strong positive correlation between irradiation and load in winter</li>
+                    <li>Public holidays show similar patterns to weekends</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
