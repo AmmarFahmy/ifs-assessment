@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, ComposedChart } from 'recharts';
+import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, ComposedChart, PieChart, Pie, Cell } from 'recharts';
 import _ from 'lodash';
 
 const ElectricityLoadDashboard = () => {
@@ -9,12 +9,16 @@ const ElectricityLoadDashboard = () => {
   const [anomalies, setAnomalies] = useState([]);
   const [timeRange, setTimeRange] = useState('week'); // 'day', 'week', 'month', 'year'
   const [selectedTab, setSelectedTab] = useState('overview'); // 'overview', 'patterns', 'forecast', 'anomalies'
+  const [selectedModel, setSelectedModel] = useState('gradient_boosting');
+  const [forecastHorizon, setForecastHorizon] = useState(24);
+  const [loadingForecast, setLoadingForecast] = useState(false);
+  const [loadingAnomalies, setLoadingAnomalies] = useState(false);
 
   useEffect(() => {
     const loadData = async () => {
       try {
         setLoading(true);
-        // const response = await window.fs.readFile('DS_ElectricityLoad.csv', { encoding: 'utf8' });
+        // Load CSV data
         const response = await fetch('/DS_ElectricityLoad.csv');
         const csvText = await response.text();
 
@@ -41,20 +45,81 @@ const ElectricityLoadDashboard = () => {
           };
         });
         
-        // Generate some demo forecast data (last 24 hours + 24 more hours)
-        const lastTimestamp = processedData[processedData.length - 1].timestamp;
-        const mockForecast = [];
+        setData(processedData);
+        setLoading(false);
+        
+        // Fetch initial forecasts and anomalies
+        if (processedData.length > 0) {
+          await fetchForecasts(processedData, 'gradient_boosting', 24);
+          await fetchAnomalies(processedData);
+        }
+      } catch (error) {
+        console.error('Error loading data:', error);
+        setLoading(false);
+      }
+    };
+    
+    loadData();
+  }, []);
+  
+  // Fetch forecasts from API 
+  const fetchForecasts = async (historicalData, modelType, horizon) => {
+    try {
+      setLoadingForecast(true);
+      
+      // Get more context data for more accurate forecasting based on horizon
+      // For longer horizons, we need more historical context
+      const contextLength = Math.max(168, horizon * 2); // At least a week of data or 2x the horizon
+      const contextData = historicalData.slice(-contextLength);  
+      
+      console.log(`Fetching forecast for model: ${modelType}, horizon: ${horizon} hours`);
+      
+      const response = await fetch('http://localhost:5000/api/forecast', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          historicalData: contextData,
+          model_type: modelType,
+          horizon: horizon
+        }),
+      });
+      
+      const result = await response.json();
+      
+      if (result.status === 'success') {
+        console.log(`Received ${result.data.length} data points, including forecast data.`);
+        setForecastData(result.data);
+      } else {
+        console.error('Error fetching forecasts:', result.message);
+        // Fall back to mock data for demo purposes
+        generateMockForecastData(historicalData, horizon);
+      }
+      
+      setLoadingForecast(false);
+    } catch (error) {
+      console.error('Error fetching forecasts:', error);
+      // Fall back to mock data for demo purposes
+      generateMockForecastData(historicalData, horizon);
+      setLoadingForecast(false);
+    }
+  };
+  
+  // Fall back to mock forecast data if API fails
+  const generateMockForecastData = (historicalData, horizon = 24) => {
+    const lastTimestamp = historicalData[historicalData.length - 1].timestamp;
+    const mockForecast = [];
         
         // Last 24 hours of actual data
-        const lastDayData = processedData.slice(-24);
-        mockForecast.push(...lastDayData);
+    const lastDayData = historicalData.slice(-24);
+    mockForecast.push(...lastDayData.map(item => ({...item, isForecast: false})));
         
-        // Next 24 hours of forecasted data
-        for (let i = 1; i <= 24; i++) {
+    // Next N hours of forecasted data based on horizon
+    for (let i = 1; i <= horizon; i++) {
           const lastDate = new Date(lastTimestamp + i * 60 * 60 * 1000);
           const hour = lastDate.getHours();
           
-          // Create a simple model based on hour of day and add some randomness
           let baseLoad;
           if (hour >= 0 && hour < 6) {
             baseLoad = 14000 + Math.random() * 1000;
@@ -78,28 +143,76 @@ const ElectricityLoadDashboard = () => {
           });
         }
         
-        // Generate some mock anomalies
-        const mockAnomalies = [];
-        for (let i = 0; i < 5; i++) {
-          const randomIndex = Math.floor(Math.random() * (processedData.length - 24)) + 24;
-          const anomalyPoint = { ...processedData[randomIndex] };
-          anomalyPoint.reason = ['Unexpected spike', 'Holiday effect', 'Weather anomaly', 'System error', 'Unknown factor'][i];
-          anomalyPoint.severity = ['High', 'Medium', 'Low'][Math.floor(Math.random() * 3)];
-          mockAnomalies.push(anomalyPoint);
-        }
-        
-        setData(processedData);
-        setForecastData(mockForecast);
-        setAnomalies(mockAnomalies);
-        setLoading(false);
-      } catch (error) {
-        console.error('Error loading data:', error);
-        setLoading(false);
+    setForecastData(mockForecast);
+  };
+  
+  // Fetch anomalies from API
+  const fetchAnomalies = async (historicalData) => {
+    try {
+      setLoadingAnomalies(true);
+      
+      // Get the last month of data for anomaly detection
+      const lastMonthData = historicalData.slice(-720);  // last 30 days (720 hours)
+      
+      console.log(`Fetching anomalies with ${lastMonthData.length} data points`);
+      
+      const response = await fetch('http://localhost:5000/api/anomalies', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          historicalData: lastMonthData
+        }),
+      });
+      
+      const result = await response.json();
+      
+      if (result.status === 'success') {
+        console.log(`Received ${result.data.length} anomalies from API`);
+        setAnomalies(result.data);
+      } else {
+        console.error('Error fetching anomalies:', result.message);
+        // Fall back to mock anomalies for demo purposes
+        generateMockAnomalies(historicalData);
       }
-    };
-    
-    loadData();
-  }, []);
+      
+      setLoadingAnomalies(false);
+    } catch (error) {
+      console.error('Error fetching anomalies:', error);
+      // Fall back to mock anomalies for demo purposes
+      generateMockAnomalies(historicalData);
+      setLoadingAnomalies(false);
+    }
+  };
+  
+  // Fall back to mock anomalies if API fails
+  const generateMockAnomalies = (historicalData) => {
+    console.log("Generating mock anomalies as fallback");
+    const mockAnomalies = [];
+    for (let i = 0; i < 5; i++) {
+      const randomIndex = Math.floor(Math.random() * (historicalData.length - 24)) + 24;
+      const anomalyPoint = { ...historicalData[randomIndex] };
+      
+      // Add derived fields for consistency with API
+      const expectedLoad = anomalyPoint.Load * (Math.random() * 0.4 + 0.8); // Random expected load for demo
+      anomalyPoint.rolling_mean = expectedLoad;
+      anomalyPoint.pct_deviation = ((anomalyPoint.Load - expectedLoad) / expectedLoad * 100).toFixed(2);
+      anomalyPoint.z_score = Math.abs((anomalyPoint.Load - expectedLoad) / (expectedLoad * 0.1));
+      
+      anomalyPoint.reason = ['Unexpected spike', 'Holiday effect', 'Weather anomaly', 'System error', 'Unknown factor'][i];
+      anomalyPoint.severity = ['High', 'Medium', 'Low'][Math.floor(Math.random() * 3)];
+      mockAnomalies.push(anomalyPoint);
+    }
+    setAnomalies(mockAnomalies);
+  };
+  
+  // Update forecast when model or horizon changes
+  useEffect(() => {
+    if (data.length > 0 && selectedTab === 'forecast') {
+      fetchForecasts(data, selectedModel, forecastHorizon);
+    }
+  }, [selectedModel, forecastHorizon, selectedTab]);
   
   // Filter data based on selected time range
   const getFilteredData = () => {
@@ -437,15 +550,67 @@ const ElectricityLoadDashboard = () => {
       {selectedTab === 'forecast' && (
         <div>
           <div className="bg-white p-4 rounded-lg shadow mb-6">
-            <h2 className="text-lg font-semibold mb-2">Load Forecast (Next 24 Hours)</h2>
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-semibold">Load Forecast</h2>
+              <div className="flex items-center space-x-4">
+                <div>
+                  <label className="text-sm text-gray-600 mr-2">Model:</label>
+                  <select 
+                    className="border border-gray-300 rounded px-2 py-1 text-sm"
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                  >
+                    <option value="gradient_boosting">Gradient Boosting</option>
+                    <option value="xgboost">XGBoost</option>
+                    <option value="random_forest">Random Forest</option>
+                    <option value="linear_regression">Linear Regression</option>
+                    <option value="svr">SVR</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm text-gray-600 mr-2">Horizon:</label>
+                  <select 
+                    className="border border-gray-300 rounded px-2 py-1 text-sm"
+                    value={forecastHorizon}
+                    onChange={(e) => setForecastHorizon(parseInt(e.target.value))}
+                  >
+                    <option value="12">12 Hours</option>
+                    <option value="24">24 Hours</option>
+                    <option value="48">48 Hours</option>
+                    <option value="72">72 Hours</option>
+                  </select>
+                </div>
+                <button 
+                  className="px-3 py-1 text-sm bg-blue-600 text-white rounded"
+                  onClick={() => fetchForecasts(data, selectedModel, forecastHorizon)}
+                  disabled={loadingForecast}
+                >
+                  {loadingForecast ? 'Loading...' : 'Refresh Forecast'}
+                </button>
+              </div>
+            </div>
+            
+            {loadingForecast ? (
+              <div className="flex items-center justify-center h-72">
+                <div className="text-lg text-gray-600">Loading forecast data...</div>
+              </div>
+            ) : (
             <div className="h-72">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={forecastData}>
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis 
                     dataKey="timestamp" 
-                    tickFormatter={(timestamp) => new Date(timestamp).getHours() + ':00'}
-                    interval={1}
+                      tickFormatter={(timestamp) => {
+                        const date = new Date(timestamp);
+                        // For longer horizons, show date and hour
+                        if (forecastHorizon > 24) {
+                          return `${date.getDate()}/${date.getMonth()+1} ${date.getHours()}:00`;
+                        }
+                        // For shorter horizons, just show hours
+                        return `${date.getHours()}:00`;
+                      }}
+                      interval={forecastHorizon > 48 ? 8 : forecastHorizon > 24 ? 4 : 2}
                   />
                   <YAxis />
                   <Tooltip 
@@ -480,6 +645,7 @@ const ElectricityLoadDashboard = () => {
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
+            )}
             <div className="flex items-center mt-4">
               <div className="w-4 h-4 bg-blue-500 rounded-full mr-2"></div>
               <span className="mr-4 text-sm">Historical Data</span>
@@ -488,6 +654,14 @@ const ElectricityLoadDashboard = () => {
               <div className="w-4 h-4 bg-blue-200 rounded-full mr-2"></div>
               <span className="text-sm">Confidence Interval (95%)</span>
             </div>
+            <p className="text-sm text-gray-600 mt-2">
+              Forecast generated using {
+                selectedModel === 'gradient_boosting' ? 'Gradient Boosting' :
+                selectedModel === 'xgboost' ? 'XGBoost' :
+                selectedModel === 'random_forest' ? 'Random Forest' :
+                selectedModel === 'linear_regression' ? 'Linear Regression' : 'SVR'
+              } model for the next {forecastHorizon} hours.
+            </p>
           </div>
           
           <div className="bg-white p-4 rounded-lg shadow">
@@ -511,10 +685,14 @@ const ElectricityLoadDashboard = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {forecastData.filter(item => item.isForecast).slice(0, 12).map((item, index) => (
+                  {forecastData
+                    .filter(item => item.isForecast)
+                    .map((item, index) => (
                     <tr key={index} className={index % 2 === 0 ? 'bg-gray-50' : 'bg-white'}>
                       <td className="py-2 px-4 border-b border-gray-200 text-sm">
                         {new Date(item.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                          {' '}
+                          {new Date(item.timestamp).toLocaleDateString([], {month: 'short', day: 'numeric'})}
                       </td>
                       <td className="py-2 px-4 border-b border-gray-200 text-sm font-semibold">
                         {item.Load.toFixed(2)}
@@ -537,7 +715,21 @@ const ElectricityLoadDashboard = () => {
       {selectedTab === 'anomalies' && (
         <div>
           <div className="bg-white p-4 rounded-lg shadow mb-6">
-            <h2 className="text-lg font-semibold mb-2">Detected Anomalies</h2>
+            <div className="flex justify-between items-center mb-2">
+              <h2 className="text-lg font-semibold">Detected Anomalies</h2>
+              <button 
+                className="px-3 py-1 text-sm bg-blue-600 text-white rounded"
+                onClick={() => fetchAnomalies(data)}
+                disabled={loadingAnomalies}
+              >
+                {loadingAnomalies ? 'Analyzing...' : 'Refresh Analysis'}
+              </button>
+            </div>
+            {loadingAnomalies ? (
+              <div className="flex items-center justify-center h-72">
+                <div className="text-lg text-gray-600">Detecting anomalies...</div>
+              </div>
+            ) : (
             <div className="h-72">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart 
@@ -573,9 +765,243 @@ const ElectricityLoadDashboard = () => {
                 </LineChart>
               </ResponsiveContainer>
             </div>
+            )}
             <p className="text-sm text-gray-600 mt-2">
               Red dots indicate detected anomalies in the electricity load pattern.
+              {anomalies.length === 0 && !loadingAnomalies && " No anomalies detected in the current data range."}
             </p>
+          </div>
+          
+          {anomalies.length > 0 && (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                {/* Anomalies by Hour of Day */}
+                <div className="bg-white p-4 rounded-lg shadow">
+                  <h2 className="text-lg font-semibold mb-2">Anomalies by Hour of Day</h2>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart 
+                        data={
+                          Array.from({length: 24}, (_, hour) => ({
+                            hour,
+                            count: anomalies.filter(a => new Date(a.timestamp).getHours() === hour).length
+                          }))
+                        }
+                      >
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="hour" label={{ value: 'Hour of Day', position: 'insideBottom', offset: -5 }} />
+                        <YAxis label={{ value: 'Number of Anomalies', angle: -90, position: 'insideLeft' }} />
+                        <Tooltip formatter={(value) => [`${value}`, 'Anomalies']} />
+                        <Bar dataKey="count" fill="#f44336" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <p className="text-sm text-gray-600 mt-2">
+                    Distribution of anomalies across different hours of the day reveals patterns of when unusual load typically occurs.
+                  </p>
+                </div>
+
+                {/* Anomalies by Day of Week */}
+                <div className="bg-white p-4 rounded-lg shadow">
+                  <h2 className="text-lg font-semibold mb-2">Anomalies by Day of Week</h2>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart 
+                        data={
+                          [
+                            'Sunday', 'Monday', 'Tuesday', 'Wednesday', 
+                            'Thursday', 'Friday', 'Saturday'
+                          ].map((day, index) => ({
+                            day,
+                            count: anomalies.filter(a => new Date(a.timestamp).getDay() === index).length
+                          }))
+                        }
+                      >
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="day" />
+                        <YAxis />
+                        <Tooltip formatter={(value) => [`${value}`, 'Anomalies']} />
+                        <Bar dataKey="count" fill="#f44336" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <p className="text-sm text-gray-600 mt-2">
+                    Analysis of which days of the week show more anomalies helps identify potential weekly patterns of unusual consumption.
+                  </p>
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                {/* Anomalies by Severity */}
+                <div className="bg-white p-4 rounded-lg shadow">
+                  <h2 className="text-lg font-semibold mb-2">Anomalies by Severity</h2>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={
+                            ['High', 'Medium', 'Low'].map(severity => ({
+                              name: severity,
+                              value: anomalies.filter(a => a.severity === severity).length
+                            }))
+                          }
+                          cx="50%"
+                          cy="50%"
+                          labelLine={true}
+                          label={({name, percent}) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                          outerRadius={80}
+                          fill="#8884d8"
+                          dataKey="value"
+                        >
+                          {
+                            ['High', 'Medium', 'Low'].map((severity, index) => (
+                              <Cell key={`cell-${index}`} fill={
+                                severity === 'High' ? '#f44336' : 
+                                severity === 'Medium' ? '#ff9800' : 
+                                '#2196f3'
+                              } />
+                            ))
+                          }
+                        </Pie>
+                        <Tooltip formatter={(value, name) => [`${value} (${((value / anomalies.length) * 100).toFixed(1)}%)`, name]} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <p className="text-sm text-gray-600 mt-2">
+                    Distribution of anomalies by severity helps prioritize which unusual patterns require immediate attention.
+                  </p>
+                </div>
+
+                {/* Anomalies by Reason */}
+                <div className="bg-white p-4 rounded-lg shadow">
+                  <h2 className="text-lg font-semibold mb-2">Anomalies by Reason</h2>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={
+                          Array.from(
+                            anomalies.reduce((acc, anomaly) => {
+                              acc.set(anomaly.reason, (acc.get(anomaly.reason) || 0) + 1);
+                              return acc;
+                            }, new Map())
+                          ).map(([reason, count]) => ({ reason, count }))
+                        }
+                        layout="vertical"
+                        margin={{ left: 150 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis type="number" />
+                        <YAxis 
+                          dataKey="reason" 
+                          type="category" 
+                          width={150}
+                          tick={{ fontSize: 12 }}
+                        />
+                        <Tooltip formatter={(value) => [`${value}`, 'Count']} />
+                        <Bar dataKey="count" fill="#2196f3" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <p className="text-sm text-gray-600 mt-2">
+                    Understanding the most common reasons for anomalies helps identify patterns and root causes.
+                  </p>
+                </div>
+              </div>
+              
+              <div className="bg-white p-4 rounded-lg shadow mb-6">
+                <h2 className="text-lg font-semibold mb-4">Anomaly Patterns & Insights</h2>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                  <div className="border rounded p-3 bg-gray-50">
+                    <h3 className="font-semibold text-sm mb-1">Time Concentration</h3>
+                    <p className="text-sm text-gray-600">
+                      {(() => {
+                        // Calculate when most anomalies occur
+                        const hourCounts = Array.from({length: 24}, (_, hour) => 
+                          anomalies.filter(a => new Date(a.timestamp).getHours() === hour).length
+                        );
+                        const maxHour = hourCounts.indexOf(Math.max(...hourCounts));
+                        const isDaytime = maxHour >= 8 && maxHour <= 18;
+                        
+                        return `Most anomalies occur around ${maxHour}:00 ${
+                          isDaytime ? "(during business hours)" : "(outside business hours)"
+                        }, which suggests ${
+                          isDaytime ? 
+                          "business activity may be causing unexpected load patterns." : 
+                          "unusual activity during off-hours may be worth investigating."
+                        }`;
+                      })()}
+                    </p>
+                  </div>
+                  
+                  <div className="border rounded p-3 bg-gray-50">
+                    <h3 className="font-semibold text-sm mb-1">Day of Week Pattern</h3>
+                    <p className="text-sm text-gray-600">
+                      {(() => {
+                        // Calculate which day has most anomalies
+                        const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                        const dayCounts = days.map((_, index) => 
+                          anomalies.filter(a => new Date(a.timestamp).getDay() === index).length
+                        );
+                        const maxDay = dayCounts.indexOf(Math.max(...dayCounts));
+                        const isWeekend = maxDay === 0 || maxDay === 6;
+                        
+                        return `${days[maxDay]} shows the highest anomaly frequency (${Math.max(...dayCounts)} occurrences), ${
+                          isWeekend ? 
+                          "which is unusual since weekend patterns typically differ from weekdays." : 
+                          "suggesting potential issues during regular work week activities."
+                        }`;
+                      })()}
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="border rounded p-3 bg-gray-50">
+                    <h3 className="font-semibold text-sm mb-1">Severity Distribution</h3>
+                    <p className="text-sm text-gray-600">
+                      {(() => {
+                        // Calculate severity distribution
+                        const severityCounts = {
+                          High: anomalies.filter(a => a.severity === 'High').length,
+                          Medium: anomalies.filter(a => a.severity === 'Medium').length,
+                          Low: anomalies.filter(a => a.severity === 'Low').length
+                        };
+                        const total = severityCounts.High + severityCounts.Medium + severityCounts.Low;
+                        const highPct = ((severityCounts.High / total) * 100).toFixed(1);
+                        
+                        return `${highPct}% of detected anomalies are high severity, ${
+                          parseFloat(highPct) > 20 ?
+                          "indicating significant deviations that should be investigated promptly." :
+                          "suggesting most unusual patterns are moderate deviations from expected load."
+                        }`;
+                      })()}
+                    </p>
+                  </div>
+                  
+                  <div className="border rounded p-3 bg-gray-50">
+                    <h3 className="font-semibold text-sm mb-1">Common Reason</h3>
+                    <p className="text-sm text-gray-600">
+                      {(() => {
+                        // Calculate most common reason
+                        const reasonCounts = {};
+                        anomalies.forEach(a => {
+                          reasonCounts[a.reason] = (reasonCounts[a.reason] || 0) + 1;
+                        });
+                        const mostCommonReason = Object.entries(reasonCounts)
+                          .sort((a, b) => b[1] - a[1])[0];
+                        
+                        return `"${mostCommonReason[0]}" is the most common reason (${mostCommonReason[1]} instances), ${
+                          mostCommonReason[0].includes("working hours") ?
+                          "suggesting business hour activities need monitoring." :
+                          mostCommonReason[0].includes("night") ?
+                          "indicating unusual night-time electricity consumption patterns." :
+                          "which may require specific attention for load management."
+                        }`;
+                      })()}
+                    </p>
+                  </div>
+                </div>
           </div>
           
           <div className="bg-white p-4 rounded-lg shadow">
@@ -591,6 +1017,9 @@ const ElectricityLoadDashboard = () => {
                       Load (MWh)
                     </th>
                     <th className="py-2 px-4 border-b border-gray-200 bg-gray-50 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      Deviation (%)
+                    </th>
+                    <th className="py-2 px-4 border-b border-gray-200 bg-gray-50 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
                       Severity
                     </th>
                     <th className="py-2 px-4 border-b border-gray-200 bg-gray-50 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
@@ -599,31 +1028,48 @@ const ElectricityLoadDashboard = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {anomalies.map((anomaly, index) => (
-                    <tr key={index} className={index % 2 === 0 ? 'bg-gray-50' : 'bg-white'}>
-                      <td className="py-2 px-4 border-b border-gray-200 text-sm">
-                        {new Date(anomaly.timestamp).toLocaleString()}
-                      </td>
-                      <td className="py-2 px-4 border-b border-gray-200 text-sm font-semibold">
-                        {anomaly.Load.toFixed(2)}
-                      </td>
-                      <td className="py-2 px-4 border-b border-gray-200 text-sm">
-                        <span className={`px-2 py-1 rounded text-xs text-white ${
-                          anomaly.severity === 'High' ? 'bg-red-500' : 
-                          anomaly.severity === 'Medium' ? 'bg-yellow-500' : 'bg-blue-500'
+                  {anomalies.map((anomaly, index) => {
+                    // Calculate percent deviation from expected (if available)
+                    // Use the pct_deviation field if available, otherwise calculate it
+                    const deviation = anomaly.pct_deviation || 
+                                      (anomaly.rolling_mean ? 
+                                      ((anomaly.Load - anomaly.rolling_mean) / anomaly.rolling_mean * 100).toFixed(2) : 
+                                      'N/A');
+                    const isPositive = parseFloat(deviation) > 0;
+                    
+                    return (
+                      <tr key={index} className={index % 2 === 0 ? 'bg-gray-50' : 'bg-white'}>
+                        <td className="py-2 px-4 border-b border-gray-200 text-sm">
+                          {new Date(anomaly.timestamp).toLocaleString()}
+                        </td>
+                        <td className="py-2 px-4 border-b border-gray-200 text-sm font-semibold">
+                          {anomaly.Load.toFixed(2)}
+                        </td>
+                        <td className={`py-2 px-4 border-b border-gray-200 text-sm font-semibold ${
+                          isPositive ? 'text-red-600' : 'text-blue-600'
                         }`}>
-                          {anomaly.severity}
-                        </span>
-                      </td>
-                      <td className="py-2 px-4 border-b border-gray-200 text-sm">
-                        {anomaly.reason}
-                      </td>
-                    </tr>
-                  ))}
+                          {deviation !== 'N/A' ? `${isPositive ? '+' : ''}${deviation}%` : 'N/A'}
+                        </td>
+                        <td className="py-2 px-4 border-b border-gray-200 text-sm">
+                          <span className={`px-2 py-1 rounded text-xs text-white ${
+                            anomaly.severity === 'High' ? 'bg-red-500' : 
+                            anomaly.severity === 'Medium' ? 'bg-yellow-500' : 'bg-blue-500'
+                          }`}>
+                            {anomaly.severity}
+                          </span>
+                        </td>
+                        <td className="py-2 px-4 border-b border-gray-200 text-sm">
+                          {anomaly.reason}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           </div>
+            </>
+          )}
         </div>
       )}
     </div>
