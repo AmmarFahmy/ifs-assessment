@@ -11,6 +11,20 @@ from sklearn.preprocessing import StandardScaler
 app = Flask(__name__)
 CORS(app)
 
+# Custom JSON encoder to handle numpy types
+class NumpyJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        if isinstance(obj, (np.floating, np.float32, np.float64)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+# Configure Flask to use our custom JSON encoder
+app.json_encoder = NumpyJSONEncoder
+
 # Path to models
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'models')
 
@@ -35,39 +49,205 @@ def load_scaler():
 
 # Preprocess data for model input
 def preprocess_data(df, metadata, scaler=None):
-    # Create cyclic features
-    df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-    df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
-    df['day_of_week_sin'] = np.sin(2 * np.pi * df['dayOfWeek'] / 7)
-    df['day_of_week_cos'] = np.cos(2 * np.pi * df['dayOfWeek'] / 7)
-    df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
-    df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
+    """
+    Preprocess data for model input, handling edge cases gracefully.
     
-    # Derived features
-    df['is_weekend'] = df['dayOfWeek'].apply(lambda x: 1 if x >= 5 else 0)
-    df['temp_squared'] = df['Temperature']**2
-    df['cloud_irradiation_interaction'] = df['Cloudiness'] * df['Irradiation']
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        DataFrame containing the data to preprocess
+    metadata : dict
+        Dictionary containing model metadata including required features
+    scaler : sklearn.preprocessing.StandardScaler, optional
+        Scaler to apply to the data if needed
+        
+    Returns:
+    --------
+    X : pandas.DataFrame
+        DataFrame containing the preprocessed features
+    df : pandas.DataFrame
+        The original DataFrame with additional calculated features
+    """
+    try:
+        # Make a copy to avoid modifying the original
+        df = df.copy()
+        
+        # First, ensure all data columns are properly typed
+        # Convert any string numeric columns to float
+        for col in df.columns:
+            # Skip timestamp and formatted date columns
+            if col in ['timestamp', 'formattedDate']:
+                continue
+                
+            # Try to convert to numeric if it's not already
+            if df[col].dtype == 'object':
+                try:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                except:
+                    print(f"Could not convert column {col} to numeric, keeping as is")
+        
+        # Ensure we have enough data
+        if len(df) < 24 * 7:  # At least one week of data
+            print("Warning: Insufficient data for feature engineering. Need at least one week of data.")
+            # We'll try to proceed anyway, but features will be limited
+        
+        # Create cyclic features
+        if 'hour' in df.columns:
+            df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+            df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+        
+        if 'dayOfWeek' in df.columns:
+            df['day_of_week_sin'] = np.sin(2 * np.pi * df['dayOfWeek'] / 7)
+            df['day_of_week_cos'] = np.cos(2 * np.pi * df['dayOfWeek'] / 7)
+        
+        if 'month' in df.columns:
+            df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
+            df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
+        
+        # Derived features
+        if 'dayOfWeek' in df.columns:
+            df['is_weekend'] = df['dayOfWeek'].apply(lambda x: 1 if x >= 5 else 0)
+        
+        if 'Temperature' in df.columns:
+            df['temp_squared'] = df['Temperature']**2
+            
+        if 'Cloudiness' in df.columns and 'Irradiation' in df.columns:
+            df['cloud_irradiation_interaction'] = df['Cloudiness'] * df['Irradiation']
+        
+        # Create lagged features from Load if sufficient data
+        try:
+            # If we have enough data, create all lags
+            for lag in [1, 2, 3, 24, 48, 168]:
+                if len(df) > lag:
+                    df[f'load_lag{lag}'] = df['Load'].shift(lag)
+                else:
+                    # Not enough data for this lag, use a simple fallback
+                    print(f"Not enough data for lag {lag}, using mean as fallback")
+                    df[f'load_lag{lag}'] = df['Load'].mean()
+            
+            # Create rolling mean features
+            if len(df) >= 6:
+                df['load_rolling_mean_6h'] = df['Load'].rolling(min_periods=1, window=min(6, len(df))).mean()
+            else:
+                df['load_rolling_mean_6h'] = df['Load'].mean()
+                
+            if len(df) >= 12:
+                df['load_rolling_mean_12h'] = df['Load'].rolling(min_periods=1, window=min(12, len(df))).mean()
+            else:
+                df['load_rolling_mean_12h'] = df['Load'].mean()
+                
+            if len(df) >= 24:
+                df['load_rolling_mean_24h'] = df['Load'].rolling(min_periods=1, window=min(24, len(df))).mean()
+            else:
+                df['load_rolling_mean_24h'] = df['Load'].mean()
+        except Exception as e:
+            print(f"Error creating lagged features: {str(e)}")
+            # Emergency fallback - create simple lag features
+            load_mean = df['Load'].mean()
+            for lag in [1, 2, 3, 24, 48, 168]:
+                df[f'load_lag{lag}'] = load_mean
+            df['load_rolling_mean_6h'] = load_mean
+            df['load_rolling_mean_12h'] = load_mean
+            df['load_rolling_mean_24h'] = load_mean
+        
+        # Fill NA values with appropriate defaults - this was causing the string/int concatenation error
+        for col in df.columns:
+            if col != 'Load' and df[col].isna().any():
+                if col in ['timestamp', 'formattedDate']:
+                    continue  # Skip datetime columns
+                elif col.startswith('load_lag') or col.startswith('load_rolling'):
+                    df[col] = df[col].fillna(df['Load'].mean())
+                elif col in ['hour_sin', 'hour_cos', 'day_of_week_sin', 'day_of_week_cos', 'month_sin', 'month_cos']:
+                    df[col] = df[col].fillna(0)  # 0 is the midpoint for sin/cos features
+                elif col == 'is_weekend':
+                    df[col] = df[col].fillna(0)  # Assume weekday as default
+                elif col in ['Temperature', 'temp_squared']:
+                    df[col] = df[col].fillna(20)  # Assume room temperature as default
+                elif col in ['Cloudiness', 'Irradiation', 'cloud_irradiation_interaction']:
+                    df[col] = df[col].fillna(50)  # Assume moderate values as default
+                elif col == 'PublicHolidays':
+                    df[col] = df[col].fillna(0)  # Assume not a holiday as default
+                else:
+                    # Check if column is numeric before using mean
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        df[col] = df[col].fillna(df[col].mean() if not pd.isna(df[col].mean()) else 0)
+                    else:
+                        df[col] = df[col].fillna("unknown")  # Use a string default for non-numeric columns
+        
+        # Make sure all required features exist, even if they're not in the metadata
+        # This is a safety measure in case the model requires features we don't have
+        all_possible_features = [
+            'hour_sin', 'hour_cos', 'day_of_week_sin', 'day_of_week_cos', 
+            'month_sin', 'month_cos', 'is_weekend', 'Temperature', 'temp_squared',
+            'Cloudiness', 'Irradiation', 'cloud_irradiation_interaction',
+            'load_lag1', 'load_lag2', 'load_lag3', 'load_lag24', 'load_lag48', 'load_lag168',
+            'load_rolling_mean_6h', 'load_rolling_mean_12h', 'load_rolling_mean_24h',
+            'PublicHolidays'
+        ]
+        
+        for feature in all_possible_features:
+            if feature not in df.columns:
+                print(f"Warning: Feature {feature} not found in data, adding with default value")
+                if feature in ['hour_sin', 'hour_cos', 'day_of_week_sin', 'day_of_week_cos', 'month_sin', 'month_cos']:
+                    df[feature] = 0
+                elif feature == 'is_weekend':
+                    df[feature] = 0
+                elif feature in ['Temperature', 'temp_squared']:
+                    df[feature] = 20
+                elif feature in ['Cloudiness', 'Irradiation', 'cloud_irradiation_interaction']:
+                    df[feature] = 50
+                elif feature.startswith('load_lag') or feature.startswith('load_rolling'):
+                    df[feature] = df['Load'].mean()
+                elif feature == 'PublicHolidays':
+                    df[feature] = 0
+                else:
+                    df[feature] = 0
+        
+        # Select only the features required by the model
+        required_features = metadata.get('features', all_possible_features)
+        
+        # Check if all required features exist
+        missing_features = [f for f in required_features if f not in df.columns]
+        if missing_features:
+            print(f"Warning: Missing required features: {missing_features}")
+            # Add missing features with default values
+            for feature in missing_features:
+                if feature in ['hour_sin', 'hour_cos', 'day_of_week_sin', 'day_of_week_cos', 'month_sin', 'month_cos']:
+                    df[feature] = 0
+                elif feature == 'is_weekend':
+                    df[feature] = 0
+                elif feature in ['Temperature', 'temp_squared']:
+                    df[feature] = 20
+                elif feature in ['Cloudiness', 'Irradiation', 'cloud_irradiation_interaction']:
+                    df[feature] = 50
+                elif feature.startswith('load_lag') or feature.startswith('load_rolling'):
+                    df[feature] = df['Load'].mean()
+                elif feature == 'PublicHolidays':
+                    df[feature] = 0
+                else:
+                    df[feature] = 0
+        
+        X = df[required_features]
+        
+        # Apply scaling if needed
+        if metadata.get('requires_scaling', False) and scaler is not None:
+            try:
+                X_scaled = scaler.transform(X)
+                X = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
+            except Exception as e:
+                print(f"Error during scaling: {str(e)}")
+                # If scaling fails, proceed with unscaled data
+                print("Proceeding with unscaled data")
+        
+        return X, df
     
-    # Create lagged features from Load
-    for lag in [1, 2, 3, 24, 48, 168]:
-        df[f'load_lag{lag}'] = df['Load'].shift(lag)
-    
-    # Create rolling mean features
-    df['load_rolling_mean_6h'] = df['Load'].rolling(6).mean()
-    df['load_rolling_mean_12h'] = df['Load'].rolling(12).mean()
-    df['load_rolling_mean_24h'] = df['Load'].rolling(24).mean()
-    
-    # Drop rows with NaN values (first rows won't have lag values)
-    df = df.dropna()
-    
-    # Select only the features required by the model
-    X = df[metadata['features']]
-    
-    # Apply scaling if needed
-    if metadata.get('requires_scaling', False) and scaler is not None:
-        X = scaler.transform(X)
-    
-    return X, df
+    except Exception as e:
+        import traceback
+        print(f"Error in preprocess_data: {str(e)}")
+        print(traceback.format_exc())
+        
+        # Return empty DataFrames as a last resort
+        return pd.DataFrame(), df
 
 # Route to get forecasts
 @app.route('/api/forecast', methods=['POST'])
@@ -160,6 +340,10 @@ def get_forecast():
                 
                 prediction = model.predict(latest_X)[0]
                 
+                # Convert numpy types to Python native types
+                if isinstance(prediction, (np.integer, np.floating, np.number)):
+                    prediction = float(prediction)
+                
                 # Update current_df with the new prediction
                 new_row['Load'] = prediction
                 current_df = pd.concat([current_df, pd.DataFrame([new_row])], ignore_index=True)
@@ -181,6 +365,10 @@ def get_forecast():
                     latest_X = X_new.iloc[-1:]
                     prediction = model.predict(latest_X)[0]
                     
+                    # Convert numpy types to Python native types
+                    if isinstance(prediction, (np.integer, np.floating, np.number)):
+                        prediction = float(prediction)
+                    
                     # Update the temp_df with the prediction
                     new_row['Load'] = prediction
                     
@@ -198,6 +386,10 @@ def get_forecast():
                         # If no similar hour, use the last prediction
                         prediction = current_df.iloc[-1]['Load']
                     
+                    # Convert numpy types to Python native types
+                    if isinstance(prediction, (np.integer, np.floating, np.number)):
+                        prediction = float(prediction)
+                    
                     new_row['Load'] = prediction
                     current_df = pd.concat([current_df, pd.DataFrame([new_row])], ignore_index=True)
             
@@ -210,8 +402,8 @@ def get_forecast():
                 'hour': new_row['hour'],
                 'dayOfWeek': new_row['dayOfWeek'],
                 # Add confidence intervals based on model type
-                'LowerBound': prediction * 0.95 if model_type == 'linear_regression' else prediction * 0.90,
-                'UpperBound': prediction * 1.05 if model_type == 'linear_regression' else prediction * 1.10
+                'LowerBound': float(prediction * 0.95) if model_type == 'linear_regression' else float(prediction * 0.90),
+                'UpperBound': float(prediction * 1.05) if model_type == 'linear_regression' else float(prediction * 1.10)
             }
             forecasts.append(forecast_point)
         
@@ -221,9 +413,9 @@ def get_forecast():
         
         # Ensure timestamps are in milliseconds for JavaScript
         if 'timestamp' in last_actual.columns:
-            # Convert datetime to timestamp in milliseconds if needed
+            # Fix the datetime conversion issue by using correct conversion method
             if isinstance(last_actual['timestamp'].iloc[0], pd.Timestamp):
-                last_actual['timestamp'] = last_actual['timestamp'].astype(int) / 10**9 * 1000
+                last_actual['timestamp'] = last_actual['timestamp'].apply(lambda x: int(x.timestamp() * 1000))
             else:
                 # If it's already a numeric timestamp in seconds, convert to milliseconds
                 last_actual['timestamp'] = last_actual['timestamp'] * 1000
@@ -302,174 +494,150 @@ def detect_anomalies():
         data = request.json
         historical_data = pd.DataFrame(data['historicalData'])
         
-        print(f"Received anomaly detection request with {len(historical_data)} data points")
-        
-        # If data is empty, return empty result
-        if historical_data.empty:
-            print("Empty dataset received, returning empty result")
-            return jsonify({
-                'status': 'success',
-                'data': []
-            })
+        # Get threshold parameter if provided, otherwise use default
+        threshold = data.get('threshold', 3.0)
+        print(f"Using threshold value: {threshold}")
         
         # Convert timestamp from milliseconds to datetime if needed
         if 'timestamp' in historical_data.columns:
             # Check if timestamp is already in milliseconds (JavaScript standard)
             if historical_data['timestamp'].iloc[0] > 1e12:  # Timestamps in milliseconds are very large numbers
-                historical_data['timestamp'] = historical_data['timestamp'] / 1000  # Convert to seconds
-            
-            # Ensure timestamp is in datetime format for processing
-            historical_data['timestamp'] = pd.to_datetime(historical_data['timestamp'], unit='s')
+                historical_data['timestamp'] = pd.to_datetime(historical_data['timestamp'] / 1000, unit='s')
+            else:
+                historical_data['timestamp'] = pd.to_datetime(historical_data['timestamp'], unit='s')
+                
+        print(f"Received anomaly detection request with {len(historical_data)} data points")
         
-        # Ensure we have the Load column
+        # Check if we have Load column
         if 'Load' not in historical_data.columns:
-            print("Error: Load column missing from input data")
             return jsonify({
                 'status': 'error',
-                'message': 'Load data missing from input'
+                'message': 'Load column not found in data'
             }), 400
-        
-        # Need at least 48 data points for meaningful anomaly detection
-        if len(historical_data) < 48:
-            print(f"Insufficient data: only {len(historical_data)} points provided")
-            return jsonify({
-                'status': 'error',
-                'message': 'Insufficient data for anomaly detection. Need at least 48 hourly data points.'
-            }), 400
-        
-        # Make sure all required columns exist
-        required_columns = ['hour', 'dayOfWeek']
-        for col in required_columns:
-            if col not in historical_data.columns:
-                print(f"Missing required column: {col}, attempting to derive it")
-                if col == 'hour' and 'timestamp' in historical_data.columns:
-                    historical_data['hour'] = historical_data['timestamp'].dt.hour
-                elif col == 'dayOfWeek' and 'timestamp' in historical_data.columns:
-                    historical_data['dayOfWeek'] = historical_data['timestamp'].dt.dayofweek
-                else:
-                    print(f"Cannot derive {col} from available data")
-                    return jsonify({
-                        'status': 'error',
-                        'message': f'Required column {col} missing and cannot be derived'
-                    }), 400
-        
-        # Simple anomaly detection based on statistical methods
+            
+        # Calculate rolling statistics for window size of 24 hours
         print("Calculating rolling statistics for anomaly detection")
-        # Calculate rolling mean and standard deviation with 24 hour window
-        historical_data['rolling_mean'] = historical_data['Load'].rolling(window=24, min_periods=12).mean()
-        historical_data['rolling_std'] = historical_data['Load'].rolling(window=24, min_periods=12).std()
+        window_size = 24*7  # 1 week rolling window
         
-        # If rolling calculations result in NaN, fill with overall mean/std
-        if historical_data['rolling_mean'].isna().any():
-            overall_mean = historical_data['Load'].mean()
-            historical_data['rolling_mean'] = historical_data['rolling_mean'].fillna(overall_mean)
-            print(f"Filled {historical_data['rolling_mean'].isna().sum()} NaN mean values with overall mean")
+        # Ensure data is sorted by timestamp
+        historical_data = historical_data.sort_values('timestamp')
         
-        if historical_data['rolling_std'].isna().any():
-            overall_std = historical_data['Load'].std()
-            historical_data['rolling_std'] = historical_data['rolling_std'].fillna(overall_std)
-            print(f"Filled {historical_data['rolling_std'].isna().sum()} NaN std values with overall std")
-            
-        # Avoid division by zero
-        zero_std_count = (historical_data['rolling_std'] == 0).sum()
-        if zero_std_count > 0:
-            print(f"Found {zero_std_count} zero values in std, replacing with mean")
-            historical_data['rolling_std'] = historical_data['rolling_std'].replace(0, historical_data['rolling_std'].mean())
+        # Calculate rolling mean and standard deviation
+        historical_data['rolling_mean'] = historical_data['Load'].rolling(window=window_size, min_periods=1).mean()
+        historical_data['rolling_std'] = historical_data['Load'].rolling(window=window_size, min_periods=1).std()
         
-        # Define anomaly threshold (z-score approach)
-        threshold = 3
+        # Fill NaN values for first rows
+        mean_load = historical_data['Load'].mean()
+        std_load = historical_data['Load'].std()
+        
+        # Count and replace NaN values
+        mean_nan_count = historical_data['rolling_mean'].isna().sum()
+        std_nan_count = historical_data['rolling_std'].isna().sum()
+        
+        historical_data['rolling_mean'] = historical_data['rolling_mean'].fillna(mean_load)
+        historical_data['rolling_std'] = historical_data['rolling_std'].fillna(std_load)
+        
+        print(f"Filled {mean_nan_count} NaN mean values with overall mean")
+        print(f"Filled {std_nan_count} NaN std values with overall std")
+        
+        # Calculate z-scores and percent deviation
         historical_data['z_score'] = abs((historical_data['Load'] - historical_data['rolling_mean']) / historical_data['rolling_std'])
+        historical_data['pct_deviation'] = ((historical_data['Load'] - historical_data['rolling_mean']) / historical_data['rolling_mean'] * 100).round(2)
         
-        # Identify anomalies (non-null z_score above threshold)
-        anomalies = historical_data[(historical_data['z_score'] > threshold) & (~historical_data['z_score'].isna())].copy()
+        # Try different thresholds from most to least strict if no anomalies found with the provided threshold
+        thresholds_to_try = [threshold]
         
-        # If no anomalies found, return empty list
-        if anomalies.empty:
-            print("No anomalies detected using z-score threshold")
-            return jsonify({
-                'status': 'success',
-                'data': []
-            })
+        # Only try other thresholds if we're using the default and not getting results
+        if threshold == 3.0 and len(historical_data[historical_data['z_score'] > threshold]) == 0:
+            thresholds_to_try = [3.0, 2.5, 2.0, 1.5]
+            
+        threshold_used = threshold
+        anomalies = pd.DataFrame()
         
-        print(f"Detected {len(anomalies)} anomalies using z-score threshold")
+        for current_threshold in thresholds_to_try:
+            # Detect anomalies based on z-score
+            anomalies = historical_data[historical_data['z_score'] > current_threshold].copy()
+            threshold_used = current_threshold
+            print(f"Found {len(anomalies)} anomalies using z-score threshold of {current_threshold}")
+            
+            if len(anomalies) > 0:
+                break
+                
+        # Calculate mean and max deviation percentages for stats
+        mean_deviation_pct = abs(historical_data['pct_deviation']).mean()
+        max_deviation_pct = abs(historical_data['pct_deviation']).max()
         
-        # Limit to a reasonable number of anomalies (top 20 by z-score)
-        if len(anomalies) > 20:
-            print(f"Limiting to top 20 anomalies from {len(anomalies)} detected")
-            anomalies = anomalies.nlargest(20, 'z_score')
-        
-        # Determine anomaly severity and reason
-        def get_severity(z_score):
-            if z_score > 5:
+        # Even if no true anomalies are found, provide the top 10 points with highest deviation
+        if len(anomalies) == 0:
+            anomalies = historical_data.sort_values('z_score', ascending=False).head(10).copy()
+            message = "No significant anomalies found based on statistical analysis. Showing top points with highest deviation for reference."
+        else:
+            message = f"Found {len(anomalies)} anomalies using threshold {threshold_used}"
+            
+            # Limit to top 20 anomalies if there are too many
+            if len(anomalies) > 20:
+                anomalies = anomalies.sort_values('z_score', ascending=False).head(20)
+                print(f"Limiting to top 20 anomalies from {len(anomalies)} detected")
+                
+        # Classify anomalies based on z-score
+        def classify_severity(z):
+            if z > 4.0:
                 return 'High'
-            elif z_score > 4:
+            elif z > 3.0:
                 return 'Medium'
-            else:
+            elif z > 2.0:
                 return 'Low'
-        
-        def get_reason(row):
-            # Simple heuristic rules to determine reason
-            load_diff = row['Load'] - row['rolling_mean']
-            direction = "high" if load_diff > 0 else "low"
-            
-            # Larger percent difference means more severe anomaly
-            pct_diff = abs(load_diff / row['rolling_mean'] * 100)
-            magnitude = "significant " if pct_diff > 25 else ""
-            
-            if row['hour'] in [9, 10, 11, 12, 13, 14, 15, 16, 17]:
-                if load_diff > 0:
-                    return f'Unexpected {magnitude}high demand during working hours'
-                else:
-                    return f'Unexpected {magnitude}low demand during working hours'
-            elif row['hour'] in [0, 1, 2, 3, 4, 5]:
-                if load_diff > 0:
-                    return f'Unexpected {magnitude}night-time activity'
-                else:
-                    return f'Lower than expected base load'
-            elif row['dayOfWeek'] in [5, 6]:  # Weekend
-                return f'Unusual weekend {direction} consumption'
+            elif z > 1.5:
+                return 'Very Low'
             else:
-                return f'Unexplained {magnitude}{direction} consumption'
+                return 'Minimal'
+                
+        anomalies['severity'] = anomalies['z_score'].apply(classify_severity)
         
-        anomalies['severity'] = anomalies['z_score'].apply(get_severity)
-        anomalies['reason'] = anomalies.apply(get_reason, axis=1)
-        
-        # Calculate and add percentage deviation from expected
-        anomalies['pct_deviation'] = ((anomalies['Load'] - anomalies['rolling_mean']) / anomalies['rolling_mean'] * 100).round(2)
-        
-        # Count severity levels
+        # Count anomalies by severity
         severity_counts = anomalies['severity'].value_counts().to_dict()
         print(f"Anomaly severity distribution: {severity_counts}")
         
-        # Prepare response
-        required_columns = ['timestamp', 'formattedDate', 'Load', 'hour', 'dayOfWeek', 'severity', 
-                          'reason', 'rolling_mean', 'z_score', 'pct_deviation']
+        # Generate reason for anomaly based on features
+        def generate_reason(row):
+            deviation = row['pct_deviation']
+            hour = row['hour'] if 'hour' in row else pd.to_datetime(row['timestamp']).hour
+            day_of_week = row['dayOfWeek'] if 'dayOfWeek' in row else pd.to_datetime(row['timestamp']).dayofweek
+            
+            if abs(deviation) > 15:
+                return "Extreme load deviation"
+            
+            if 9 <= hour <= 17 and 0 <= day_of_week <= 4:  # Weekday working hours
+                return "Unusual pattern during working hours"
+            elif hour < 6 or hour >= 22:  # Night
+                return "Unexpected night-time consumption"
+            elif day_of_week >= 5:  # Weekend
+                return "Unusual weekend pattern"
+            else:
+                return "Irregular load pattern"
+                
+        anomalies['reason'] = anomalies.apply(generate_reason, axis=1)
         
-        # Ensure all required columns exist
-        for col in required_columns:
-            if col not in anomalies.columns:
-                if col == 'formattedDate' and 'timestamp' in anomalies.columns:
-                    # Generate formattedDate from timestamp if missing
-                    anomalies['formattedDate'] = anomalies['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        # Convert timestamps to milliseconds for JavaScript
+        if 'timestamp' in anomalies.columns:
+            anomalies['timestamp'] = anomalies['timestamp'].apply(lambda x: int(x.timestamp() * 1000))
         
-        # Select only columns that exist
-        existing_columns = [col for col in required_columns if col in anomalies.columns]
-        anomalies_result = anomalies[existing_columns].to_dict('records')
+        # Prepare result
+        result = anomalies.to_dict('records')
+        print(f"Returning {len(result)} results to frontend")
         
-        # Ensure timestamp is in milliseconds for JavaScript
-        for item in anomalies_result:
-            if 'timestamp' in item:
-                # If it's a pandas Timestamp or datetime object
-                if isinstance(item['timestamp'], (pd.Timestamp, datetime)):
-                    item['timestamp'] = int(item['timestamp'].timestamp() * 1000)
-                else:
-                    # If it's a numeric timestamp in seconds
-                    item['timestamp'] = int(item['timestamp'] * 1000) if item['timestamp'] < 1e12 else int(item['timestamp'])
-        
-        print(f"Returning {len(anomalies_result)} anomalies to frontend")
+        # Return the data along with statistics
         return jsonify({
             'status': 'success',
-            'data': anomalies_result
+            'data': result,
+            'message': message,
+            'stats': {
+                'data_points': len(historical_data),
+                'anomalies_found': len(anomalies),
+                'mean_deviation_pct': mean_deviation_pct,
+                'max_deviation_pct': max_deviation_pct,
+                'threshold_tried': threshold_used
+            }
         })
         
     except Exception as e:
@@ -480,6 +648,36 @@ def detect_anomalies():
             'status': 'error',
             'message': str(e)
         }), 500
+
+# Helper function to prepare anomaly response
+def prepare_anomaly_response(anomalies_df):
+    # Prepare response
+    required_columns = ['timestamp', 'formattedDate', 'Load', 'hour', 'dayOfWeek', 'severity', 
+                      'reason', 'rolling_mean', 'z_score', 'pct_deviation']
+    
+    # Ensure all required columns exist
+    for col in required_columns:
+        if col not in anomalies_df.columns:
+            if col == 'formattedDate' and 'timestamp' in anomalies_df.columns:
+                # Generate formattedDate from timestamp if missing
+                anomalies_df['formattedDate'] = anomalies_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Select only columns that exist
+    existing_columns = [col for col in required_columns if col in anomalies_df.columns]
+    anomalies_result = anomalies_df[existing_columns].to_dict('records')
+    
+    # Ensure timestamp is in milliseconds for JavaScript
+    for item in anomalies_result:
+        if 'timestamp' in item:
+            # If it's a pandas Timestamp or datetime object
+            if isinstance(item['timestamp'], (pd.Timestamp, datetime)):
+                item['timestamp'] = int(item['timestamp'].timestamp() * 1000)
+            else:
+                # If it's a numeric timestamp in seconds
+                item['timestamp'] = int(item['timestamp'] * 1000) if item['timestamp'] < 1e12 else int(item['timestamp'])
+    
+    print(f"Returning {len(anomalies_result)} results to frontend")
+    return anomalies_result
 
 if __name__ == '__main__':
     print("Starting Flask API server for electricity load forecasting on http://localhost:5000")

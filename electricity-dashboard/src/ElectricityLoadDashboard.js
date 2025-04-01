@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, ComposedChart, PieChart, Pie, Cell } from 'recharts';
+import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, ComposedChart, PieChart, Pie, Cell, Scatter } from 'recharts';
 import _ from 'lodash';
 
 const ElectricityLoadDashboard = () => {
@@ -13,66 +13,80 @@ const ElectricityLoadDashboard = () => {
   const [forecastHorizon, setForecastHorizon] = useState(24);
   const [loadingForecast, setLoadingForecast] = useState(false);
   const [loadingAnomalies, setLoadingAnomalies] = useState(false);
+  const [anomalyMessage, setAnomalyMessage] = useState('');
+  const [anomalyStats, setAnomalyStats] = useState(null);
+  const [forecastError, setForecastError] = useState('');
+  const [anomalyThreshold, setAnomalyThreshold] = useState(2.0); // Default threshold value
 
+  // Fetch historical data from CSV
+  const fetchHistoricalData = async () => {
+    try {
+      // Load CSV data
+      const response = await fetch('/DS_ElectricityLoad.csv');
+      const csvText = await response.text();
+
+      // Parse CSV
+      const Papa = await import('papaparse');
+      const parsed = Papa.default.parse(csvText, {
+        header: true,
+        dynamicTyping: true,
+        skipEmptyLines: true
+      });
+      
+      // Process the data
+      const processedData = parsed.data.map(row => {
+        const date = new Date(row.Date);
+        return {
+          ...row,
+          timestamp: date.getTime(),
+          hour: date.getHours(),
+          dayOfWeek: date.getDay(),
+          month: date.getMonth(),
+          year: date.getFullYear(),
+          dayOfMonth: date.getDate(),
+          formattedDate: date.toLocaleString()
+        };
+      });
+      
+      setData(processedData);
+      return processedData;
+    } catch (error) {
+      console.error('Error loading historical data:', error);
+      return [];
+    }
+  };
+
+  // Effect hook to load initial data
   useEffect(() => {
     const loadData = async () => {
       try {
         setLoading(true);
-        // Load CSV data
-        const response = await fetch('/DS_ElectricityLoad.csv');
-        const csvText = await response.text();
-
-        // Parse CSV
-        const Papa = await import('papaparse');
-        const parsed = Papa.default.parse(csvText, {
-          header: true,
-          dynamicTyping: true,
-          skipEmptyLines: true
-        });
-        
-        // Process the data
-        const processedData = parsed.data.map(row => {
-          const date = new Date(row.Date);
-          return {
-            ...row,
-            timestamp: date.getTime(),
-            hour: date.getHours(),
-            dayOfWeek: date.getDay(),
-            month: date.getMonth(),
-            year: date.getFullYear(),
-            dayOfMonth: date.getDate(),
-            formattedDate: date.toLocaleString()
-          };
-        });
-        
-        setData(processedData);
-        setLoading(false);
-        
-        // Fetch initial forecasts and anomalies
-        if (processedData.length > 0) {
-          await fetchForecasts(processedData, 'gradient_boosting', 24);
-          await fetchAnomalies(processedData);
+        const historicalData = await fetchHistoricalData();
+        if (historicalData.length > 0) {
+          await fetchForecasts(historicalData, selectedModel, forecastHorizon);
+          await fetchAnomalies(historicalData);
         }
+        setLoading(false);
       } catch (error) {
-        console.error('Error loading data:', error);
+        console.error('Error in initial data load:', error);
         setLoading(false);
       }
     };
-    
     loadData();
-  }, []);
+  }, []); // No dependencies needed since this should only run once on mount
   
   // Fetch forecasts from API 
   const fetchForecasts = async (historicalData, modelType, horizon) => {
     try {
       setLoadingForecast(true);
+      setForecastError('');
       
       // Get more context data for more accurate forecasting based on horizon
       // For longer horizons, we need more historical context
       const contextLength = Math.max(168, horizon * 2); // At least a week of data or 2x the horizon
       const contextData = historicalData.slice(-contextLength);  
       
-      console.log(`Fetching forecast for model: ${modelType}, horizon: ${horizon} hours`);
+      console.log(`Fetching forecast for model: ${modelType}, horizon: ${horizon} hours, using ${contextData.length} data points`);
       
       const response = await fetch('http://localhost:5000/api/forecast', {
         method: 'POST',
@@ -86,6 +100,15 @@ const ElectricityLoadDashboard = () => {
         }),
       });
       
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Error ${response.status}: ${errorText}`);
+        setForecastError(`Server error (${response.status}): ${errorText}`);
+        generateMockForecastData(historicalData, horizon);
+        setLoadingForecast(false);
+        return;
+      }
+      
       const result = await response.json();
       
       if (result.status === 'success') {
@@ -93,6 +116,7 @@ const ElectricityLoadDashboard = () => {
         setForecastData(result.data);
       } else {
         console.error('Error fetching forecasts:', result.message);
+        setForecastError(`Error: ${result.message}`);
         // Fall back to mock data for demo purposes
         generateMockForecastData(historicalData, horizon);
       }
@@ -100,6 +124,7 @@ const ElectricityLoadDashboard = () => {
       setLoadingForecast(false);
     } catch (error) {
       console.error('Error fetching forecasts:', error);
+      setForecastError(`Error: ${error.message}`);
       // Fall back to mock data for demo purposes
       generateMockForecastData(historicalData, horizon);
       setLoadingForecast(false);
@@ -147,14 +172,19 @@ const ElectricityLoadDashboard = () => {
   };
   
   // Fetch anomalies from API
-  const fetchAnomalies = async (historicalData) => {
+  const fetchAnomalies = async (historicalData, threshold = anomalyThreshold) => {
     try {
       setLoadingAnomalies(true);
+      setAnomalyMessage('');
+      setAnomalyStats(null);
       
-      // Get the last month of data for anomaly detection
-      const lastMonthData = historicalData.slice(-720);  // last 30 days (720 hours)
+      // Get data for anomaly detection - use entire dataset for better results
+      // but limit to last 2000 points if the dataset is huge
+      const dataForAnalysis = historicalData.length > 2000 
+        ? historicalData.slice(-2000) 
+        : historicalData;
       
-      console.log(`Fetching anomalies with ${lastMonthData.length} data points`);
+      console.log(`Fetching anomalies with ${dataForAnalysis.length} data points, threshold: ${threshold}`);
       
       const response = await fetch('http://localhost:5000/api/anomalies', {
         method: 'POST',
@@ -162,7 +192,8 @@ const ElectricityLoadDashboard = () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          historicalData: lastMonthData
+          historicalData: dataForAnalysis,
+          threshold: threshold
         }),
       });
       
@@ -171,8 +202,19 @@ const ElectricityLoadDashboard = () => {
       if (result.status === 'success') {
         console.log(`Received ${result.data.length} anomalies from API`);
         setAnomalies(result.data);
+        
+        // Set message if provided
+        if (result.message) {
+          setAnomalyMessage(result.message);
+        }
+        
+        // Set stats if provided
+        if (result.stats) {
+          setAnomalyStats(result.stats);
+        }
       } else {
         console.error('Error fetching anomalies:', result.message);
+        setAnomalyMessage(`Error: ${result.message}`);
         // Fall back to mock anomalies for demo purposes
         generateMockAnomalies(historicalData);
       }
@@ -180,6 +222,7 @@ const ElectricityLoadDashboard = () => {
       setLoadingAnomalies(false);
     } catch (error) {
       console.error('Error fetching anomalies:', error);
+      setAnomalyMessage(`Error: ${error.message}`);
       // Fall back to mock anomalies for demo purposes
       generateMockAnomalies(historicalData);
       setLoadingAnomalies(false);
@@ -212,7 +255,7 @@ const ElectricityLoadDashboard = () => {
     if (data.length > 0 && selectedTab === 'forecast') {
       fetchForecasts(data, selectedModel, forecastHorizon);
     }
-  }, [selectedModel, forecastHorizon, selectedTab]);
+  }, [selectedModel, forecastHorizon, selectedTab, data]);
   
   // Filter data based on selected time range
   const getFilteredData = () => {
@@ -314,6 +357,35 @@ const ElectricityLoadDashboard = () => {
     };
   };
   
+  // Find the AnomaliesTab or the section that renders the anomaly chart
+  // Look for the LineChart or ComposedChart component that displays anomalies
+
+  // Find where the custom tooltip for anomalies is defined
+  const CustomTooltip = ({ active, payload, label }) => {
+    if (active && payload && payload.length) {
+      // Find if there's an anomaly at this timestamp
+      const point = payload[0].payload;
+      const anomalyAtThisPoint = anomalies.find(a => a.timestamp === point.timestamp);
+      
+      return (
+        <div className="bg-white p-2 border rounded shadow-md">
+          <p className="font-medium">{new Date(point.timestamp).toLocaleString()}</p>
+          <p>Load: {point.Load.toLocaleString()} MWh</p>
+          {anomalyAtThisPoint && (
+            <>
+              <p className="text-red-600 font-medium">Anomaly Detected</p>
+              <p>Expected: {anomalyAtThisPoint.rolling_mean?.toLocaleString() || 'N/A'} MWh</p>
+              <p>Deviation: {anomalyAtThisPoint.pct_deviation}%</p>
+              {anomalyAtThisPoint.reason && <p>Possible reason: {anomalyAtThisPoint.reason}</p>}
+              <p>Severity: {anomalyAtThisPoint.severity}</p>
+            </>
+          )}
+        </div>
+      );
+    }
+    return null;
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -590,6 +662,13 @@ const ElectricityLoadDashboard = () => {
               </div>
             </div>
             
+            {forecastError && (
+              <div className="p-3 mb-4 rounded bg-yellow-50 text-yellow-800">
+                <p className="text-sm">{forecastError}</p>
+                <p className="text-xs mt-1">Showing mock forecast data as fallback. The API may be experiencing issues.</p>
+              </div>
+            )}
+            
             {loadingForecast ? (
               <div className="flex items-center justify-center h-72">
                 <div className="text-lg text-gray-600">Loading forecast data...</div>
@@ -601,16 +680,16 @@ const ElectricityLoadDashboard = () => {
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis 
                     dataKey="timestamp" 
-                      tickFormatter={(timestamp) => {
-                        const date = new Date(timestamp);
-                        // For longer horizons, show date and hour
-                        if (forecastHorizon > 24) {
-                          return `${date.getDate()}/${date.getMonth()+1} ${date.getHours()}:00`;
-                        }
-                        // For shorter horizons, just show hours
-                        return `${date.getHours()}:00`;
-                      }}
-                      interval={forecastHorizon > 48 ? 8 : forecastHorizon > 24 ? 4 : 2}
+                    tickFormatter={(timestamp) => {
+                      const date = new Date(timestamp);
+                      // For longer horizons, show date and hour
+                      if (forecastHorizon > 24) {
+                        return `${date.getDate()}/${date.getMonth()+1} ${date.getHours()}:00`;
+                      }
+                      // For shorter horizons, just show hours
+                      return `${date.getHours()}:00`;
+                    }}
+                    interval={forecastHorizon > 48 ? 8 : forecastHorizon > 24 ? 4 : 2}
                   />
                   <YAxis />
                   <Tooltip 
@@ -652,15 +731,18 @@ const ElectricityLoadDashboard = () => {
               <div className="w-4 h-4 bg-red-500 rounded-full mr-2"></div>
               <span className="mr-4 text-sm">Forecast</span>
               <div className="w-4 h-4 bg-blue-200 rounded-full mr-2"></div>
-              <span className="text-sm">Confidence Interval (95%)</span>
+              <span className="text-sm">Confidence Interval</span>
             </div>
             <p className="text-sm text-gray-600 mt-2">
-              Forecast generated using {
-                selectedModel === 'gradient_boosting' ? 'Gradient Boosting' :
-                selectedModel === 'xgboost' ? 'XGBoost' :
-                selectedModel === 'random_forest' ? 'Random Forest' :
-                selectedModel === 'linear_regression' ? 'Linear Regression' : 'SVR'
-              } model for the next {forecastHorizon} hours.
+              {forecastError ? 
+                'Using simplified forecast model due to API errors.' :
+                `Forecast generated using ${
+                  selectedModel === 'gradient_boosting' ? 'Gradient Boosting' :
+                  selectedModel === 'xgboost' ? 'XGBoost' :
+                  selectedModel === 'random_forest' ? 'Random Forest' :
+                  selectedModel === 'linear_regression' ? 'Linear Regression' : 'SVR'
+                } model for the next ${forecastHorizon} hours.`
+              }
             </p>
           </div>
           
@@ -717,58 +799,146 @@ const ElectricityLoadDashboard = () => {
           <div className="bg-white p-4 rounded-lg shadow mb-6">
             <div className="flex justify-between items-center mb-2">
               <h2 className="text-lg font-semibold">Detected Anomalies</h2>
-              <button 
-                className="px-3 py-1 text-sm bg-blue-600 text-white rounded"
-                onClick={() => fetchAnomalies(data)}
-                disabled={loadingAnomalies}
-              >
-                {loadingAnomalies ? 'Analyzing...' : 'Refresh Analysis'}
-              </button>
+              <div className="flex items-center space-x-4">
+                <div className="flex items-center">
+                  <span className="text-sm text-gray-600 mr-2">Threshold:</span>
+                  <input 
+                    type="range" 
+                    min="1.0" 
+                    max="3.0" 
+                    step="0.1" 
+                    value={anomalyThreshold}
+                    onChange={(e) => setAnomalyThreshold(parseFloat(e.target.value))}
+                    className="w-32"
+                  />
+                  <span className="text-sm ml-2">{anomalyThreshold.toFixed(1)}</span>
+                </div>
+                <button 
+                  className="px-3 py-1 text-sm bg-blue-600 text-white rounded"
+                  onClick={() => fetchAnomalies(data, anomalyThreshold)}
+                  disabled={loadingAnomalies}
+                >
+                  {loadingAnomalies ? 'Analyzing...' : 'Refresh Analysis'}
+                </button>
+              </div>
             </div>
+            
+            {anomalyMessage && (
+              <div className={`p-3 mb-4 rounded ${anomalyMessage.includes('No significant') ? 'bg-blue-50 text-blue-800' : 'bg-yellow-50 text-yellow-800'}`}>
+                <p className="text-sm">{anomalyMessage}</p>
+                {anomalyStats && (
+                  <div className="mt-2 grid grid-cols-4 gap-2 text-xs">
+                    <div className="border rounded p-2">
+                      <span className="font-semibold">Mean Deviation:</span> {anomalyStats.mean_deviation_pct.toFixed(2)}%
+                    </div>
+                    <div className="border rounded p-2">
+                      <span className="font-semibold">Max Deviation:</span> {anomalyStats.max_deviation_pct.toFixed(2)}%
+                    </div>
+                    <div className="border rounded p-2">
+                      <span className="font-semibold">Data Points:</span> {anomalyStats.data_points.toLocaleString()}
+                    </div>
+                    <div className="border rounded p-2">
+                      <span className="font-semibold">Threshold:</span> {anomalyStats.threshold_tried}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            
             {loadingAnomalies ? (
               <div className="flex items-center justify-center h-72">
                 <div className="text-lg text-gray-600">Detecting anomalies...</div>
               </div>
             ) : (
-            <div className="h-72">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart 
-                  data={data.slice(-5000)} 
-                  margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis 
-                    dataKey="timestamp" 
-                    tickFormatter={(timestamp) => {
-                      const date = new Date(timestamp);
-                      return `${(date.getMonth()+1)}/${date.getDate()}`;
-                    }}
-                    interval={240}
-                  />
-                  <YAxis />
-                  <Tooltip 
-                    labelFormatter={(timestamp) => new Date(timestamp).toLocaleString()}
-                    formatter={(value) => [`${value.toFixed(2)} MWh`, 'Load']}
-                  />
-                  <Legend />
-                  <Line type="monotone" dataKey="Load" stroke="#3182ce" dot={false} />
-                  {anomalies.map((anomaly, index) => (
-                    <Line
-                      key={index}
-                      dataKey="Load"
-                      data={[anomaly]}
-                      stroke="#ff0000"
-                      strokeWidth={0}
-                      dot={{ stroke: '#ff0000', strokeWidth: 2, r: 6 }}
+              <div className="h-72">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart 
+                    data={data.slice(-5000)} 
+                    margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis 
+                      dataKey="timestamp" 
+                      tickFormatter={(timestamp) => {
+                        const date = new Date(timestamp);
+                        return `${(date.getMonth()+1)}/${date.getDate()}`;
+                      }}
+                      interval={240}
                     />
-                  ))}
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
+                    <YAxis />
+                    <Tooltip 
+                      content={({ active, payload, label }) => {
+                        if (active && payload && payload.length) {
+                          const point = payload[0].payload;
+                          const anomalyAtThisPoint = anomalies.find(a => a.timestamp === point.timestamp);
+                          
+                          return (
+                            <div className="bg-white p-2 border rounded shadow-md">
+                              <p className="font-medium">{new Date(point.timestamp).toLocaleString()}</p>
+                              <p>Load: {point.Load.toLocaleString()} MWh</p>
+                              {anomalyAtThisPoint && (
+                                <>
+                                  <p className="text-red-600 font-medium">Anomaly Detected</p>
+                                  <p>Expected: {anomalyAtThisPoint.rolling_mean?.toLocaleString() || 'N/A'} MWh</p>
+                                  <p>Deviation: {anomalyAtThisPoint.pct_deviation}%</p>
+                                  {anomalyAtThisPoint.reason && <p>Possible reason: {anomalyAtThisPoint.reason}</p>}
+                                  <p>Severity: {anomalyAtThisPoint.severity}</p>
+                                </>
+                              )}
+                            </div>
+                          );
+                        }
+                        return null;
+                      }}
+                    />
+                    <Legend />
+                    <Line 
+                      type="monotone" 
+                      dataKey="Load" 
+                      stroke="#3182ce" 
+                      dot={false} 
+                    />
+                    
+                    {/* Group all anomalies into a single scatter chart to avoid duplicate legend items */}
+                    <Scatter
+                      name="Anomalies"
+                      data={anomalies}
+                      fill="#ff0000"
+                      line={false}
+                    >
+                      {anomalies.map((anomaly, index) => (
+                        <Cell
+                          key={`anomaly-${index}`}
+                          fill="white"
+                          stroke={
+                            anomaly.severity === 'High' ? '#ff0000' : 
+                            anomaly.severity === 'Medium' ? '#ff9800' : 
+                            anomaly.severity === 'Low' ? '#2196f3' : 
+                            anomaly.severity === 'Very Low' ? '#4caf50' : '#9e9e9e'
+                          }
+                          strokeWidth={2}
+                          r={
+                            anomaly.severity === 'High' ? 6 : 
+                            anomaly.severity === 'Medium' ? 5 : 
+                            anomaly.severity === 'Low' ? 4 : 3
+                          }
+                        />
+                      ))}
+                    </Scatter>
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
             )}
             <p className="text-sm text-gray-600 mt-2">
-              Red dots indicate detected anomalies in the electricity load pattern.
-              {anomalies.length === 0 && !loadingAnomalies && " No anomalies detected in the current data range."}
+              {anomalies.length > 0 ? (
+                <>
+                  Colored dots indicate detected anomalies in the electricity load pattern. 
+                  {anomalies.some(a => a.severity === 'Very Low' || a.severity === 'Minimal') && 
+                    " Smaller dots represent minor deviations that may not be true anomalies."}
+                </>
+              ) : (
+                !loadingAnomalies && "No anomalies detected in the current data. Try refreshing the analysis or selecting a different time period."
+              )}
             </p>
           </div>
           
@@ -1043,7 +1213,7 @@ const ElectricityLoadDashboard = () => {
                           {new Date(anomaly.timestamp).toLocaleString()}
                         </td>
                         <td className="py-2 px-4 border-b border-gray-200 text-sm font-semibold">
-                          {anomaly.Load.toFixed(2)}
+                          {typeof anomaly.Load === 'number' ? anomaly.Load.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : 'N/A'}
                         </td>
                         <td className={`py-2 px-4 border-b border-gray-200 text-sm font-semibold ${
                           isPositive ? 'text-red-600' : 'text-blue-600'
