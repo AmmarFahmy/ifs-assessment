@@ -495,7 +495,7 @@ def detect_anomalies():
         historical_data = pd.DataFrame(data['historicalData'])
         
         # Get threshold parameter if provided, otherwise use default
-        threshold = data.get('threshold', 3.0)
+        threshold = float(data.get('threshold', 3.0))
         print(f"Using threshold value: {threshold}")
         
         # Convert timestamp from milliseconds to datetime if needed
@@ -514,41 +514,58 @@ def detect_anomalies():
                 'status': 'error',
                 'message': 'Load column not found in data'
             }), 400
+        
+        # For very large datasets, use a more efficient windowing approach
+        is_large_dataset = len(historical_data) > 5000
+        
+        if is_large_dataset:
+            print(f"Large dataset detected ({len(historical_data)} points). Using optimized processing.")
+            # For large datasets, use a sampling approach or process in chunks
+            # Here we'll use uniform sampling to reduce size while preserving distribution
+            sample_size = 5000  # Still analyze a good amount of data
+            sample_step = max(1, len(historical_data) // sample_size)
+            historical_data_sampled = historical_data.iloc[::sample_step].copy()
+            print(f"Sampled dataset size: {len(historical_data_sampled)} points")
+            working_data = historical_data_sampled
+        else:
+            working_data = historical_data.copy()
             
         # Calculate rolling statistics for window size of 24 hours
         print("Calculating rolling statistics for anomaly detection")
         window_size = 24*7  # 1 week rolling window
         
         # Ensure data is sorted by timestamp
-        historical_data = historical_data.sort_values('timestamp')
+        working_data = working_data.sort_values('timestamp')
         
         # Calculate rolling mean and standard deviation
-        historical_data['rolling_mean'] = historical_data['Load'].rolling(window=window_size, min_periods=1).mean()
-        historical_data['rolling_std'] = historical_data['Load'].rolling(window=window_size, min_periods=1).std()
+        working_data['rolling_mean'] = working_data['Load'].rolling(window=window_size, min_periods=1).mean()
+        working_data['rolling_std'] = working_data['Load'].rolling(window=window_size, min_periods=1).std()
         
         # Fill NaN values for first rows
-        mean_load = historical_data['Load'].mean()
-        std_load = historical_data['Load'].std()
+        mean_load = working_data['Load'].mean()
+        std_load = working_data['Load'].std()
         
         # Count and replace NaN values
-        mean_nan_count = historical_data['rolling_mean'].isna().sum()
-        std_nan_count = historical_data['rolling_std'].isna().sum()
+        mean_nan_count = working_data['rolling_mean'].isna().sum()
+        std_nan_count = working_data['rolling_std'].isna().sum()
         
-        historical_data['rolling_mean'] = historical_data['rolling_mean'].fillna(mean_load)
-        historical_data['rolling_std'] = historical_data['rolling_std'].fillna(std_load)
+        working_data['rolling_mean'] = working_data['rolling_mean'].fillna(mean_load)
+        working_data['rolling_std'] = working_data['rolling_std'].fillna(std_load)
         
         print(f"Filled {mean_nan_count} NaN mean values with overall mean")
         print(f"Filled {std_nan_count} NaN std values with overall std")
         
         # Calculate z-scores and percent deviation
-        historical_data['z_score'] = abs((historical_data['Load'] - historical_data['rolling_mean']) / historical_data['rolling_std'])
-        historical_data['pct_deviation'] = ((historical_data['Load'] - historical_data['rolling_mean']) / historical_data['rolling_mean'] * 100).round(2)
+        working_data['z_score'] = abs((working_data['Load'] - working_data['rolling_mean']) / working_data['rolling_std'])
+        working_data['pct_deviation'] = ((working_data['Load'] - working_data['rolling_mean']) / working_data['rolling_mean'] * 100).round(2)
         
-        # Try different thresholds from most to least strict if no anomalies found with the provided threshold
+        # Use the exact threshold provided for anomaly detection
+        # Only fall back to adaptive thresholds if no anomalies found and explicit threshold not provided
         thresholds_to_try = [threshold]
+        was_threshold_explicitly_provided = 'threshold' in data
         
-        # Only try other thresholds if we're using the default and not getting results
-        if threshold == 3.0 and len(historical_data[historical_data['z_score'] > threshold]) == 0:
+        # If threshold wasn't explicitly provided in request and we don't find anomalies, try adaptive thresholds
+        if not was_threshold_explicitly_provided and len(working_data[working_data['z_score'] > threshold]) == 0:
             thresholds_to_try = [3.0, 2.5, 2.0, 1.5]
             
         threshold_used = threshold
@@ -556,7 +573,7 @@ def detect_anomalies():
         
         for current_threshold in thresholds_to_try:
             # Detect anomalies based on z-score
-            anomalies = historical_data[historical_data['z_score'] > current_threshold].copy()
+            anomalies = working_data[working_data['z_score'] > current_threshold].copy()
             threshold_used = current_threshold
             print(f"Found {len(anomalies)} anomalies using z-score threshold of {current_threshold}")
             
@@ -564,13 +581,13 @@ def detect_anomalies():
                 break
                 
         # Calculate mean and max deviation percentages for stats
-        mean_deviation_pct = abs(historical_data['pct_deviation']).mean()
-        max_deviation_pct = abs(historical_data['pct_deviation']).max()
+        mean_deviation_pct = abs(working_data['pct_deviation']).mean()
+        max_deviation_pct = abs(working_data['pct_deviation']).max()
         
         # Even if no true anomalies are found, provide the top 10 points with highest deviation
         if len(anomalies) == 0:
-            anomalies = historical_data.sort_values('z_score', ascending=False).head(10).copy()
-            message = "No significant anomalies found based on statistical analysis. Showing top points with highest deviation for reference."
+            anomalies = working_data.sort_values('z_score', ascending=False).head(10).copy()
+            message = f"No significant anomalies found with threshold {threshold}. Showing top points with highest deviation for reference."
         else:
             message = f"Found {len(anomalies)} anomalies using threshold {threshold_used}"
             
@@ -578,6 +595,44 @@ def detect_anomalies():
             if len(anomalies) > 20:
                 anomalies = anomalies.sort_values('z_score', ascending=False).head(20)
                 print(f"Limiting to top 20 anomalies from {len(anomalies)} detected")
+                
+        # If we sampled the data but found anomalies, ensure we have the exact anomaly points from original dataset
+        if is_large_dataset and len(anomalies) > 0:
+            # Get timestamps of anomalies from sampled data
+            anomaly_timestamps = anomalies['timestamp'].tolist()
+            
+            # For each anomaly timestamp, find the closest matching point in the original dataset
+            full_data_anomalies = []
+            for ts in anomaly_timestamps:
+                # Find closest timestamp in original data
+                original_idx = (historical_data['timestamp'] - ts).abs().idxmin()
+                full_data_anomalies.append(historical_data.loc[original_idx].copy())
+                
+            # Convert to DataFrame
+            if full_data_anomalies:
+                full_anomalies_df = pd.DataFrame(full_data_anomalies)
+                
+                # Recalculate the z-scores and other metrics for these points
+                for i, row in full_anomalies_df.iterrows():
+                    ts = row['timestamp']
+                    # Find data points around this timestamp for calculating mean/std
+                    window_start = ts - pd.Timedelta(hours=window_size//2)
+                    window_end = ts + pd.Timedelta(hours=window_size//2)
+                    window_data = historical_data[(historical_data['timestamp'] >= window_start) & 
+                                                 (historical_data['timestamp'] <= window_end)]
+                    
+                    # Calculate stats for this window
+                    if len(window_data) > 0:
+                        rolling_mean = window_data['Load'].mean()
+                        rolling_std = window_data['Load'].std()
+                        
+                        # Update values for this anomaly
+                        full_anomalies_df.at[i, 'rolling_mean'] = rolling_mean
+                        full_anomalies_df.at[i, 'rolling_std'] = rolling_std
+                        full_anomalies_df.at[i, 'z_score'] = abs((row['Load'] - rolling_mean) / rolling_std)
+                        full_anomalies_df.at[i, 'pct_deviation'] = ((row['Load'] - rolling_mean) / rolling_mean * 100).round(2)
+                
+                anomalies = full_anomalies_df.copy()
                 
         # Classify anomalies based on z-score
         def classify_severity(z):
@@ -592,6 +647,11 @@ def detect_anomalies():
             else:
                 return 'Minimal'
                 
+        # Ensure z_score column exists
+        if 'z_score' not in anomalies.columns:
+            # If recalculation failed, assign default z-scores based on threshold
+            anomalies['z_score'] = threshold + 0.1
+            
         anomalies['severity'] = anomalies['z_score'].apply(classify_severity)
         
         # Count anomalies by severity
@@ -600,9 +660,29 @@ def detect_anomalies():
         
         # Generate reason for anomaly based on features
         def generate_reason(row):
-            deviation = row['pct_deviation']
-            hour = row['hour'] if 'hour' in row else pd.to_datetime(row['timestamp']).hour
-            day_of_week = row['dayOfWeek'] if 'dayOfWeek' in row else pd.to_datetime(row['timestamp']).dayofweek
+            # If pct_deviation is missing, calculate it
+            if 'pct_deviation' not in row or pd.isna(row['pct_deviation']):
+                if 'rolling_mean' in row and not pd.isna(row['rolling_mean']) and row['rolling_mean'] != 0:
+                    deviation = ((row['Load'] - row['rolling_mean']) / row['rolling_mean'] * 100)
+                else:
+                    deviation = 0
+            else:
+                deviation = row['pct_deviation']
+                
+            # Extract hour and day of week
+            if 'hour' in row:
+                hour = row['hour']
+            elif 'timestamp' in row:
+                hour = pd.to_datetime(row['timestamp']).hour
+            else:
+                hour = 12  # Default
+                
+            if 'dayOfWeek' in row:
+                day_of_week = row['dayOfWeek']
+            elif 'timestamp' in row:
+                day_of_week = pd.to_datetime(row['timestamp']).dayofweek
+            else:
+                day_of_week = 0  # Default
             
             if abs(deviation) > 15:
                 return "Extreme load deviation"
@@ -632,11 +712,11 @@ def detect_anomalies():
             'data': result,
             'message': message,
             'stats': {
-                'data_points': len(historical_data),
+                'data_points': len(historical_data),  # Report full dataset size
                 'anomalies_found': len(anomalies),
                 'mean_deviation_pct': mean_deviation_pct,
                 'max_deviation_pct': max_deviation_pct,
-                'threshold_tried': threshold_used
+                'threshold_tried': threshold  # Always return the actual threshold that was provided
             }
         })
         

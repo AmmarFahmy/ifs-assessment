@@ -178,13 +178,8 @@ const ElectricityLoadDashboard = () => {
       setAnomalyMessage('');
       setAnomalyStats(null);
       
-      // Get data for anomaly detection - use entire dataset for better results
-      // but limit to last 2000 points if the dataset is huge
-      const dataForAnalysis = historicalData.length > 2000 
-        ? historicalData.slice(-2000) 
-        : historicalData;
-      
-      console.log(`Fetching anomalies with ${dataForAnalysis.length} data points, threshold: ${threshold}`);
+      // Use all data points for analysis instead of limiting to 2000
+      console.log(`Fetching anomalies with ${historicalData.length} data points, threshold: ${threshold}`);
       
       const response = await fetch('http://localhost:5000/api/anomalies', {
         method: 'POST',
@@ -192,7 +187,7 @@ const ElectricityLoadDashboard = () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          historicalData: dataForAnalysis,
+          historicalData: historicalData,
           threshold: threshold
         }),
       });
