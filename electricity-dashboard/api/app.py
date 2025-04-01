@@ -640,9 +640,9 @@ def detect_anomalies():
                 return 'High'
             elif z > 3.0:
                 return 'Medium'
-            elif z > 2.0:
+            elif z > 2.5:
                 return 'Low'
-            elif z > 1.5:
+            elif z > 1.8:
                 return 'Very Low'
             else:
                 return 'Minimal'

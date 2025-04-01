@@ -1005,10 +1005,10 @@ const ElectricityLoadDashboard = () => {
                       <PieChart>
                         <Pie
                           data={
-                            ['High', 'Medium', 'Low'].map(severity => ({
+                            ['High', 'Medium', 'Low', 'Very Low', 'Minimal'].map(severity => ({
                               name: severity,
-                              value: anomalies.filter(a => a.severity === severity).length
-                            }))
+                              value: anomalies.filter(a => a.severity === severity).length || 0
+                            })).filter(item => item.value > 0)
                           }
                           cx="50%"
                           cy="50%"
@@ -1019,11 +1019,13 @@ const ElectricityLoadDashboard = () => {
                           dataKey="value"
                         >
                           {
-                            ['High', 'Medium', 'Low'].map((severity, index) => (
+                            ['High', 'Medium', 'Low', 'Very Low', 'Minimal'].map((severity, index) => (
                               <Cell key={`cell-${index}`} fill={
                                 severity === 'High' ? '#f44336' : 
                                 severity === 'Medium' ? '#ff9800' : 
-                                '#2196f3'
+                                severity === 'Low' ? '#2196f3' : 
+                                severity === 'Very Low' ? '#4caf50' :
+                                '#9e9e9e'
                               } />
                             ))
                           }
@@ -1218,7 +1220,10 @@ const ElectricityLoadDashboard = () => {
                         <td className="py-2 px-4 border-b border-gray-200 text-sm">
                           <span className={`px-2 py-1 rounded text-xs text-white ${
                             anomaly.severity === 'High' ? 'bg-red-500' : 
-                            anomaly.severity === 'Medium' ? 'bg-yellow-500' : 'bg-blue-500'
+                            anomaly.severity === 'Medium' ? 'bg-yellow-500' : 
+                            anomaly.severity === 'Low' ? 'bg-blue-500' :
+                            anomaly.severity === 'Very Low' ? 'bg-green-500' :
+                            'bg-gray-500'
                           }`}>
                             {anomaly.severity}
                           </span>
