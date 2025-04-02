@@ -36,8 +36,18 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(
 
 
 def load_model(model_type):
-    # Hardcoded for simplicity, could be dynamic
-    latest_timestamp = "20250402_052044"
+    # Dynamically pick the latest timestamp from the models directory
+    model_files = [f for f in os.listdir(MODELS_DIR) if f.startswith(
+        f"model_{model_type}_") and f.endswith(".joblib")]
+    if not model_files:
+        raise FileNotFoundError(
+            f"No model files found for model type: {model_type}")
+
+    # Extract timestamps and find the latest one
+    timestamps = [f.split('_')[-2] + "_" + f.split('_')
+                  [-1].split('.')[0] for f in model_files]
+    latest_timestamp = max(timestamps)
+
     model_path = os.path.join(
         MODELS_DIR, f"model_{model_type}_{latest_timestamp}.joblib")
     metadata_path = os.path.join(
@@ -53,8 +63,19 @@ def load_model(model_type):
 # Load feature scaler if needed
 
 
-def load_scaler():
-    latest_timestamp = "20250401_200319"  # Hardcoded for simplicity
+def load_scaler(model_type):
+    # latest_timestamp = "20250401_200319"  # Hardcoded for simplicity
+    # Dynamically pick the latest timestamp from the models directory
+    model_files = [f for f in os.listdir(MODELS_DIR) if f.startswith(
+        f"model_{model_type}_") and f.endswith(".joblib")]
+    if not model_files:
+        raise FileNotFoundError(
+            f"No model files found for model type: {model_type}")
+
+    # Extract timestamps and find the latest one
+    timestamps = [f.split('_')[-2] + "_" + f.split('_')
+                  [-1].split('.')[0] for f in model_files]
+    latest_timestamp = max(timestamps)
     scaler_path = os.path.join(
         MODELS_DIR, f"feature_scaler_{latest_timestamp}.joblib")
     return joblib.load(scaler_path)
@@ -307,7 +328,8 @@ def get_forecast():
 
         # Load model and metadata
         model, metadata = load_model(model_type)
-        scaler = load_scaler() if metadata.get('requires_scaling', False) else None
+        scaler = load_scaler(model_type) if metadata.get(
+            'requires_scaling', False) else None
 
         # Create a copy of the DataFrame for forecasting
         forecast_df = historical_data.copy()
